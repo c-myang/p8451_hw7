@@ -1,0 +1,217 @@
+---
+title: "Machine Learning for Epi: Assignment 7"
+output:
+  html_document: default
+  word_document: default
+date: "2023-02-28"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE, 
+                      warning = F,
+                      message = F,
+                      fig.dim = c(12, 7))
+
+library(tidyverse)
+library(caret)
+library(rpart)
+library(rpart.plot)
+library(pROC)
+library(NHANES)
+library(e1071)
+```
+
+## Description of Data
+
+The data we will be using are from the `mi.data.csv` dataset, a patient dataset containing features describing clinical tests and comorbidities related to MIs, and an indicator for whether the individual was readmitted to the hospital within 30 days of discharge. *We will be using this dataset to predict readmission for myocardial infarction.* We have restricted the dataset to 14 features and an outcome which distinguishes those who were readmitted to the hospital for MI within 30 days (1=Yes, 0=No).
+
+### Step 1: Load data and prepare for analysis
+
+The code chunk below loads the data, omits missing observations, and converts the variables Race1, Education, HHIncome, Diabetes, PhysActive, and Smoke100 to factor variables. Although Classification Trees can handle missing data, SVC models cannot, and therefore we will omit missing variables to be able to compare model performance on the same subset of training data.
+
+```{r load_data}
+mi_data = readr::read_csv("./mi.data.csv") %>% 
+  mutate(Sex = as.factor(Sex), 
+         Pulm.adema = as.factor(Pulm.adema),
+         FC = as.factor(FC), 
+         Arr = as.factor(Arr), 
+         Diab = as.factor(Diab), 
+         Obesity = as.factor(Obesity),
+         Asthma = as.factor(Asthma),
+         readmission = as.factor(readmission)) %>% 
+  select(-ID) %>% 
+  drop_na()
+
+summary(mi_data)
+```
+
+Our resulting dataset contains 1700 observations of 15 features, with 1 containing our binary outcome variable, `readmission`. Based on the summary, we can see that the distribution of MI readmits is quite unbalanced, with a 9.35% prevalence of cases. 
+
+### Step 2: Partition the data 
+
+The code chunk below partitions the data into training and testing sets, using a 70/30 split. 
+
+```{r partition_data}
+set.seed(123)
+
+#Creating balanced partitions in the data
+train_index = createDataPartition(mi_data$readmission, p = 0.7, list = FALSE)
+
+mi_train = mi_data[train_index,]
+mi_test = mi_data[-train_index,]
+
+#Check distribution of the outcome between train and test data
+summary(mi_train$readmission) 
+summary(mi_test$readmission)
+```
+
+We can see that there are similar distributions of the variable `readmission`, with approximately 9% of observations having having to be readmitted across both the training and testing sets, indicating that the data were successfully partitioned.
+
+### Step 3: Construct logistic regression models to predict healthy days
+
+We will fit 3 prediction models to predict readmission for MI. (feature name: `readmission``). 
+
+- Model 1 (`class_tree`): Classification Tree based on all features.
+
+- Model 2 (`mod_svc`): Support Vector Classifier (i.e. Support Vector Machine with a linear classifier) based on all features.
+
+- Model 3 (`mod_log`): A logistic model based on all features that will serve as our baseline model.
+
+The models will be trained and selected based on the highest Area Under the ROC (AUROC) rather than accuracy, because we want to balance the sensitivity and specificity of diabetes classification. This will be done using `summaryFunction = twoClassSummary` and `metric = "ROC"` options within `trainControl()` and `train()` in caret, respectively.
+
+#### Classification Tree
+
+To fit the classification tree, we will train using 10-fold cross-validation, and set the tune grid to values ranging from 0.001 to 0.3, searching in increments of 0.01. We will use down-sampling because of a 90/10 imbalance of the outcome variable, Diabetes, in the data.
+
+```{r classtree}
+set.seed(123)
+
+#Creating 10-fold cross-validation and using down-sampling because of imbalance in data
+train.control.class = trainControl(method = "cv", number = 10, sampling = "down",
+                                   summaryFunction = twoClassSummary, classProbs = TRUE)
+
+#Create sequence of cp parameters to try 
+grid.2 = expand.grid(cp = seq(0.001, 0.3, by = 0.01))
+
+#Train model
+class_tree = train(Diabetes ~ ., data = NHANES_train, method = "rpart", trControl = train.control.class, tuneGrid = grid.2, metric = "ROC")
+
+# View results
+class_tree$results %>% head() %>% knitr::kable()
+
+# Obtain variable importance on the final model within training data
+varImp(class_tree)
+
+# Plot classification tree
+rpart.plot(class_tree$finalModel)
+
+# Save results
+class_perf = class_tree$results %>% arrange(desc(ROC)) %>% 
+  slice(1) %>% 
+  rename(Hyperparameter = "cp")
+```
+
+The resulting model found that for the most optimal AUROC of 78.91%, there is a relatively small complexity parameter Cp of 0.001, which suggests that increasing the size and complexity of the tree yields better model performance. We can see that the most important variables in the classification tree in descending order of importance include Age, BMI, and Weight, and as such these are the features that are split near the top of the tree, while lower-importance variables are split near the bottom of the tree.
+
+#### SVC Model
+
+To fit the SVC model, we will train using 10-fold cross-validation, and set the tune grid of length 30 of values ranging from 0.001 to 2. We will also use down-sampling because of a 90/10 imbalance of the outcome variable, Diabetes, in the data.
+
+```{r mod_svc}
+set.seed(123)
+
+#Set 10-fold cross-validation and downsample
+train_control = trainControl(method = "cv", number = 10, sampling = "down", classProbs = T, summaryFunction = twoClassSummary)
+
+#Incorporate different values for cost (C)
+mod_svc = train(Diabetes ~ ., data = NHANES_train, method = "svmLinear",  trControl = train_control, 
+                preProcess = c("center", "scale"), 
+                tuneGrid = expand.grid(C = seq(0.001, 2, length = 30)), 
+                metric = "ROC")
+
+# View results from training 
+mod_svc$results %>% arrange(desc(ROC)) %>% head() %>% knitr::kable()
+
+#Visualize accuracy versus values of C
+plot(mod_svc)
+
+# Save results
+svc_perf = mod_svc$results %>% arrange(desc(ROC)) %>% 
+  slice(1) %>%
+  rename(Hyperparameter = "C")
+```
+
+For the most optimal AUROC of 81.63%, the the trained SVC model found a hyperparameter (C) of 1.035, allowing a moderate threshold of misclassification between classes. As confirmed by the plot, other values of C from 0.001 to 2 did not optimize the ROC. 
+
+#### Logistic Regression Model
+
+To fit the logistic model, we will feed all features into the model, and train within caret on the training dataset.
+
+```{r mod_logistic}
+set.seed(123)
+train_control_log = trainControl(summaryFunction = twoClassSummary, classProbs = TRUE)
+
+mod_log = train(Diabetes ~ ., data = NHANES_train, method = "glm", trControl = train_control_log, metric = "ROC")
+
+# View results from training 
+mod_log$results %>% knitr::kable()
+
+# Save model results
+log_perf = mod_log$results %>% arrange(desc(ROC)) %>% slice(1) %>% 
+  rename(Hyperparameter = "parameter") %>% 
+  mutate(Hyperparameter = as.numeric(Hyperparameter))
+```
+
+The resulting model yielded an AUROC of 80.73%, with a very high sensitivity of 98.5% but a very low specificity of 8.24%.
+
+#### Comparing performance across models
+
+Finally, let's compare the performance results on the training data across the 3 models.
+
+```{r compare}
+rbind(class_perf, log_perf, svc_perf) %>% 
+  mutate(Model = c("Classification Tree", "Logistic Regression", "SVC")) %>% 
+  relocate(Model) %>% 
+  arrange(desc(ROC)) %>% 
+  knitr::kable(digits = 4)
+```
+
+The table shows that the SVC model has the best performance as measured by AUROC (81.64%%), followed by the baseline logistic regression model (80.73%), then the Classification Tree (78.91%). We can see that for the SVC, there is better balance of sensitivity (71.76%) and specificity (77.9%), and while the baseline model has the second highest AUROC, there is a very large imbalance of sensitivity (98.49%) and specificity (8.24%). Therefore, I would choose the SVC as my final model to optimally classify diabetes without an overwhelming imbalance of false positives that would be introduced if I chose the baseline model.
+
+### Step 4: Final Model Evaluation
+
+Finally, we will evaluate the performance our final SVC model by making predictions in the test data. We will use the `confusionMatrix()` function to get performance measures of sensitivity, specificity, NPV, and PPV, and accuracy for the model, and plot the ROC curve.
+
+```{r test}
+# Make predictions in test set
+pred = mod_svc %>% predict(NHANES_test)
+NHANES_test = NHANES_test %>% mutate(pred = as.factor(pred))
+
+# Get evaluation metrics from test set
+cm = confusionMatrix(data = NHANES_test$pred, reference = NHANES_test$Diabetes, positive = "Yes")
+
+
+#Create ROC Curve for Analysis
+pred_prob <- predict(mod_svc, NHANES_test, type = "prob")
+
+# Plot Area under the Receiver Operating Curve (AUROC)
+analysis =  roc(response = NHANES_test$Diabetes, predictor = pred_prob[,2])
+
+# View results
+cm
+analysis$auc
+
+plot(1 - analysis$specificities, analysis$sensitivities, type = "l",
+ylab = "Sensitivity",xlab = "1-Specificity", col = "black", lwd = 2,
+main = "ROC Curve for Diabetes Classification")
+abline(a = 0, b = 1)
+```
+
+On the testing set, we can see that the AUROC of our final model is 82.35%, with accuracy of 72.56%, sensitivity of 81.73%, and specificity of 71.5%. Moreover, we see a large imbalance between the PPV (24.85%) and NPV (97.14%), which may be affected due to low prevalence (10.34%) of diabetes cases in the data such that there is a much higher probability of truly detecting persons without diabetes.
+
+### SVC Model Limitations
+
+One main consideration that arose was the imbalance of cases and controls in the NHANES data that we used to train the model on, where there were a disproportionate number of cases without diabetes compared to those with diabetes. With imbalanced data, information required to make an accurate prediction about the minority class is limited, and therefore when applied to new data, the model may not perform well when trying to predict new cases of diabetes. Although we dealt with this issue by downsampling while training our model, we saw a lower PPV, and this limitation is what we may expect when applying the algorithm on new data with a low prevalence of diabetes.
+
+Another limitation of the SVC model is that it does not inherently perform feature selection, and therefore may result in limited prediction performance and overfitting on new datasets because of irrelevant features that were included in the model when training on the original data. As such, there can be limitations when applying this model on large datasets or high-dimensional feature spaces. Moreover, depending on what types of applications the SVC model is used for, there are also limitations to the model's interpretability.
+
