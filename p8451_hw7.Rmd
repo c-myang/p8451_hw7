@@ -19,11 +19,43 @@ library(gbm)
 library(pROC)
 library(rpart.plot)
 library(rpart)
+library(gtsummary)
 ```
 
 ## Description of Data
 
 The data we will be using are from data analyzed by Mattheny et al. 2021, a patient dataset of all inpatients discharged from Vanderbilt University Medical Center between January 1, 2007, and December 31, 2016, with a primary diagnosis of AMI. *We will be using this dataset to predict readmission for myocardial infarction.* We have restricted the dataset to 14 features and an outcome which distinguishes those who were readmitted to the hospital for MI within 30 days of discharge (1=Yes, 0=No).
+
+## Analysis Pipeline
+
+The pipeline for this analysis is outlined below:
+
+1. Data Preparation
+  -	Removing ID variable
+  -	Removing missing variables
+  -	Converting variables to factor when appropriate
+  -	Check balance
+  -	Centering and scaling (important for looking at variable importance)
+
+2. Data partitioning
+  -	70/30 split into training and testing data
+
+3. Training
+  -	5-fold cross validation on the full training set
+  - Train best model based on area under the receiver operating characteristic curve (AUROC) performance metric
+  -	Downsample data if unbalanced
+  -	Tuning hyperparameters: 
+    - Elastic Net: alpha and lambda
+    - Classification Tree: Cp
+    -	Random Forest: mtry
+    
+4. Comparing model performance
+  -	Compare AUROC, sensitivity, and specificity across models
+  - Select model based on AUROC
+
+5. Apply model to testing data
+  -	Evaluate confusion matrix
+  - Examine variable importance if applicable
 
 ### Step 1: Load data and prepare for analysis
 
@@ -50,6 +82,11 @@ mi_data = readr::read_csv("./mi.data.csv") %>%
          readmission = as.factor(readmission)) %>% 
   select(-ID) 
 
+
+# Center and scale mi_data
+set.up.preprocess = preProcess(mi_data, method = c("center", "scale"))
+mi_data = predict(set.up.preprocess, mi_data)
+
 summary(mi_data)
 
 ```
@@ -72,7 +109,6 @@ mi_test = mi_data[-train_index,]
 #Check distribution of the outcome between train and test data
 summary(mi_train$readmission) 
 summary(mi_test$readmission)
-
 ```
 
 We can see that there are similar distributions of the variable `readmission`, with approximately 9% of observations having having to be readmitted across both the training and testing sets, indicating that the data were successfully partitioned.
@@ -124,7 +160,7 @@ The resulting model found that for the most optimal AUROC of 54.03%, there is a 
 
 #### Random Forest Model
 
-To fit the Random Forest model, we will train using 5-fold cross-validation, and set the tune grid for the mtry hyperparameter to values ranging from 2 to 3 in increments of 0.01. We will also use down-sampling because of a 90/10 imbalance of the outcome variable in the data.
+To fit the Random Forest model, we will train using 5-fold cross-validation, and set the tune grid for the mtry hyperparameter to sample anywhere from 1 to 14 (all) variables in data. We will also use down-sampling because of a 90/10 imbalance of the outcome variable in the data. We will set the number of trees to 150. 
 
 ```{r mod_rf}
 set.seed(123)
@@ -133,24 +169,14 @@ set.seed(123)
 train_control = trainControl(method = "cv", number = 5, sampling = "down", 
                              classProbs = T, summaryFunction = twoClassSummary)
 
-#Trying three different values of mtry
-mtry.vals = c(ncol(mi_train)-1, sqrt(ncol(mi_train)-1), 0.5*ncol(mi_train)-1)
-mtry.grid = expand.grid(.mtry=round(mtry.vals))
-mtry.grid = expand.grid(.mtry = seq(2, 3, by = 0.01))
+#Trying grid of values of mtry
+mtry.grid = expand.grid(.mtry = seq(1, 14, by = 1))
 
 mod_rf = train(readmission ~ ., data = mi_train, method = "rf", metric = "ROC", tuneGrid = mtry.grid,
                trControl = train_control, 
-               ntree = 100)
+               ntree = 200)
 
-confusionMatrix(mod_rf)
-mod_rf$results
-mod_rf$bestTune
-mod_rf$finalModel
-
-varImp(mod_rf)
 plot(varImp(mod_rf))
-
-varImpPlot(mod_rf$finalModel)
 
 # View results
 rf_perf = mod_rf$results %>% arrange(desc(ROC)) %>% head() 
@@ -162,11 +188,11 @@ rf_perf = rf_perf %>%
   select(-mtry)
 ```
 
-For the most optimal AUROC of 81.63%, the the trained SVC model found a hyperparameter (C) of 1.035, allowing a moderate threshold of misclassification between classes. As confirmed by the plot, other values of C from 0.001 to 2 did not optimize the ROC. 
+The resulting model found that for the highest model performance AUROC of 58.83%, the optimal mtry hyperparameter value was 1, which suggests that random sampling single variable to split for each tree was sufficient for high model performance. We can see that the most important variables in the random forest in descending order of importance include WBC, SBP, and Age, which are similar to the results we find in the classification tree, where WBC and SBP were the most important variables.
 
 #### Elastic Net Regression Model
 
-To fit the logistic model, we will feed all features into the model, and train within caret on the training dataset.
+To fit the elastic model, we will feed all features into the model, and train within caret using 5-fold CV and down-sampling. We will set the tune length to 100 for the number of combinations to search for alpha and lambda.
 
 ```{r mod_EN}
 set.seed(123)
@@ -174,8 +200,8 @@ set.seed(123)
 train_control = trainControl(method = "cv", number = 5, sampling = "down", classProbs = T, summaryFunction = twoClassSummary)
 
 mod_EN = train(readmission ~ ., data = mi_train, method = "glmnet", 
-                 trControl = train_control, 
-                 tuneLength = 100)
+               trControl = train_control,
+               tuneLength = 100)
 
 #Print the values of alpha and lambda that gave best prediction
 mod_EN$bestTune
@@ -190,7 +216,7 @@ EN_perf = EN_perf %>%
   select(-alpha, -lambda)
 ```
 
-The resulting model yielded an AUROC of 62.385%.
+The resulting model yielded an AUROC of 62.385%, with hyperparameters of alpha = 0.264 and lambda = 0.0298.
 
 #### Comparing performance across models
 
@@ -204,11 +230,11 @@ rbind(class_perf, rf_perf, EN_perf) %>%
   knitr::kable(digits = 4)
 ```
 
-The table shows that the Elastic Net model has the best performance as measured by AUROC (62.38%%), followed by the random forest model (60.55%), then the Classification Tree (54.03%). We can see that for the Elastic Net model, there is a better balance of sensitivity (55.41%) and specificity (65.22%) compared to the random forest and classification tree models, which have lower sensitivities. Therefore, I would choose the Elastic Net as my final model to optimally classify MI readmission.
+The table shows that the Elastic Net model has the best performance as measured by AUROC (62.38%%), followed by the random forest model (60.55%), then the Classification Tree (54.03%). We can see that for the Elastic Net model, there is a better balance of sensitivity (55.41%) and specificity (65.22%) compared to the random forest and classification tree models, which have lower sensitivities. Having a parametric model with the best performance may indicate that the relationships in our data did not have sufficient complexity to warrant implementing a more complex ensemble method, and lead to an improved performance of the Elastic Net model versus the tree-based models. Therefore, based on interpretability and model performance I would choose the Elastic Net as my final model to optimally classify MI readmission.
 
 ### Step 4: Final Model Evaluation
 
-Finally, we will evaluate the performance our final SVC model by making predictions in the test data. We will use the `confusionMatrix()` function to get performance measures of sensitivity, specificity, NPV, and PPV, and accuracy for the model, and plot the ROC curve.
+Finally, we will evaluate the performance our final Elastic Net model by making predictions in the test data. We will use the `confusionMatrix()` function to get performance measures of sensitivity, specificity, NPV, and PPV, and accuracy for the model, and plot the ROC curve.
 
 ```{r test}
 # Make predictions in test set
@@ -234,11 +260,4 @@ main = "ROC Curve for Diabetes Classification")
 abline(a = 0, b = 1)
 ```
 
-On the testing set, we can see that the AUROC of our final model is 59.72%, with accuracy of 54.81%, sensitivity of 61.7%, and specificity of 54.1%. Moreover, we see a large imbalance between the PPV (12.03%) and NPV (93.28%), which may be affected due to low prevalence of readmission cases in the data such that there is a much higher probability of truly detecting persons without readmission.
-
-### Elastic Net Model Limitations
-
-One main consideration that arose was the imbalance of cases and controls in the NHANES data that we used to train the model on, where there were a disproportionate number of cases without diabetes compared to those with diabetes. With imbalanced data, information required to make an accurate prediction about the minority class is limited, and therefore when applied to new data, the model may not perform well when trying to predict new cases of diabetes. Although we dealt with this issue by downsampling while training our model, we saw a lower PPV, and this limitation is what we may expect when applying the algorithm on new data with a low prevalence of diabetes.
-
-Another limitation of the SVC model is that it does not inherently perform feature selection, and therefore may result in limited prediction performance and overfitting on new datasets because of irrelevant features that were included in the model when training on the original data. As such, there can be limitations when applying this model on large datasets or high-dimensional feature spaces. Moreover, depending on what types of applications the SVC model is used for, there are also limitations to the model's interpretability.
-
+On the testing set, we can see that the AUROC of our final model is 59.72% (95% CI : 0.5037, 0.592), with an accuracy of 54.81%, sensitivity of 61.7%, and specificity of 54.1%. The plot shows an ROC curve that is close to the diagonal line, suggesting that the performance of our model is only minimally improved over a random classifier. Moreover, we see a large imbalance between the PPV (12.03%) and NPV (93.28%), which may be affected due to low prevalence of readmission cases in the data such that there is a much higher probability of truly detecting persons without readmission. 
