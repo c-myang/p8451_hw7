@@ -19,7 +19,6 @@ library(gbm)
 library(pROC)
 library(rpart.plot)
 library(rpart)
-library(gtsummary)
 ```
 
 ## Description of Data
@@ -31,35 +30,35 @@ The data we will be using are from data analyzed by Mattheny et al. 2021, a pati
 The pipeline for this analysis is outlined below:
 
 1. Data Preparation
-  -	Removing ID variable
-  -	Removing missing variables
-  -	Converting variables to factor when appropriate
-  -	Check balance
-  -	Centering and scaling (important for looking at variable importance)
+    -	Removing ID variable
+    -	Removing missing variables
+    -	Converting variables to factor when appropriate
+    -	Check balance
+    -	Centering and scaling 
 
 2. Data partitioning
-  -	70/30 split into training and testing data
+    -	70/30 split into training and testing data
 
 3. Training
-  -	5-fold cross validation on the full training set
-  - Train best model based on area under the receiver operating characteristic curve (AUROC) performance metric
-  -	Downsample data if unbalanced
+    -	5-fold cross validation on the full training set
+    - Train best model based on area under the receiver operating characteristic curve (AUROC) performance metric
+    -	Downsample data if unbalanced
   -	Tuning hyperparameters: 
-    - Elastic Net: alpha and lambda
-    - Classification Tree: Cp
-    -	Random Forest: mtry
+      - Elastic Net: alpha and lambda
+      - Classification Tree: Cp
+      -	Random Forest: mtry
     
 4. Comparing model performance
-  -	Compare AUROC, sensitivity, and specificity across models
-  - Select model based on AUROC
+    -	Compare AUROC, sensitivity, and specificity across models
+    - Select model based on AUROC
 
 5. Apply model to testing data
-  -	Evaluate confusion matrix
-  - Examine variable importance if applicable
+    -	Evaluate confusion matrix
+    - Examine variable importance if applicable
 
 ### Step 1: Load data and prepare for analysis
 
-The code chunk below loads the data, omits missing observations, and converts the variables Race1, Education, HHIncome, Diabetes, PhysActive, and Smoke100 to factor variables. Although Classification Trees can handle missing data, SVC models cannot, and therefore we will omit missing variables to be able to compare model performance on the same subset of training data.
+The code chunk below loads the data, omits missing observations, and converts the variables Race1, Education, HHIncome, Diabetes, PhysActive, and Smoke100 to factor variables. Although Classification Trees can handle missing data, EN models cannot, and therefore we will omit missing variables to be able to compare model performance on the same subset of training data. We will also center and scale the data for the same reasons.
 
 ```{r load_data}
 mi_data = readr::read_csv("./mi.data.csv") %>% 
@@ -82,16 +81,14 @@ mi_data = readr::read_csv("./mi.data.csv") %>%
          readmission = as.factor(readmission)) %>% 
   select(-ID) 
 
-
 # Center and scale mi_data
 set.up.preprocess = preProcess(mi_data, method = c("center", "scale"))
 mi_data = predict(set.up.preprocess, mi_data)
 
 summary(mi_data)
-
 ```
 
-Our resulting dataset contains 1700 observations of 15 features, with 1 containing our binary outcome variable, `readmission`. Based on the summary, we can see that the distribution of MI readmits is quite unbalanced, with a 9.35% prevalence of cases. 
+Our resulting dataset contains `nrow(mi_data)` observations of `ncol(mi_data)` features, with 1 containing our binary outcome variable, `readmission`. Based on the summary, we can see that the distribution of MI readmits is quite unbalanced, with a 9.35% prevalence of cases. 
 
 ### Step 2: Partition the data 
 
@@ -115,7 +112,7 @@ We can see that there are similar distributions of the variable `readmission`, w
 
 ### Step 3: Model Fitting
 
-We will fit 3 prediction models to predict readmission for MI. (feature name: `readmission``). 
+We will fit 3 prediction models to predict readmission for MI. (feature name: `readmission`). 
 
 - Model 1 (`class_tree`): Classification Tree based on all features.
 
@@ -188,7 +185,7 @@ rf_perf = rf_perf %>%
   select(-mtry)
 ```
 
-The resulting model found that for the highest model performance AUROC of 58.83%, the optimal mtry hyperparameter value was 1, which suggests that random sampling single variable to split for each tree was sufficient for high model performance. We can see that the most important variables in the random forest in descending order of importance include WBC, SBP, and Age, which are similar to the results we find in the classification tree, where WBC and SBP were the most important variables.
+The resulting model found that for the highest model performance AUROC of 58.31%, the optimal mtry hyperparameter value was 1, which suggests that random sampling single variable to split for each tree was sufficient for higher model performance. We can see that the most important variables in the random forest in descending order of importance include SBP, WBC, and Age, which are similar to the results we find in the classification tree, where WBC and SBP were the most important variables.
 
 #### Elastic Net Regression Model
 
